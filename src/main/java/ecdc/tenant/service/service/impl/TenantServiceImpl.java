@@ -1,11 +1,14 @@
 package ecdc.tenant.service.service.impl;
 
 import ecdc.tenant.service.domain.dto.TenantDto;
+import ecdc.tenant.service.domain.request.CreateTenantRequest;
 import ecdc.tenant.service.domain.model.Tenant;
 import ecdc.tenant.service.enums.StatusCode;
+import ecdc.tenant.service.enums.TenantLifecycleStatus;
 import ecdc.tenant.service.record.Response;
 import ecdc.tenant.service.repository.TenantRepository;
 import ecdc.tenant.service.service.TenantService;
+import ecdc.tenant.service.service.TenantProvisioningService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -29,14 +32,68 @@ import static ecdc.tenant.service.utility.AppUtils.*;
 public class TenantServiceImpl implements TenantService {
 
     private final TenantRepository tenantRepository;
+    private final TenantProvisioningService tenantProvisioningService;
 
     @Override
-    public ResponseEntity<Response> create(TenantDto tenantDto) {
-        log.info("inside create tenant :: {}", tenantDto);
-        validateUniqueTenantFields(tenantDto, null);
-        Tenant tenant = tenantDto.toEntity(new Tenant());
+    public ResponseEntity<Response> create(CreateTenantRequest request) {
+        log.info("inside create tenant :: participantBpn={}, participantDid={}",
+                request.getParticipantBpn(), request.getParticipantDid());
+
+        validateUniqueForCreate(request, null);
+
+        String generatedCode = generateTenantCode();
+        String tenantKey = toTenantKey(generatedCode);
+
+        /**
+         * Deriving tenant runtime config
+         */
+        String k8sNamespace = "edc-" + tenantKey;
+        String databaseName = truncate("edc_" + tenantKey, 128);
+        String databaseUsername = truncate("edc_" + tenantKey + "_user", 128);
+
+        String tenantBaseUrl = defaultIfBlank(System.getenv("TENANT_GATEWAY_BASE_URL"), "https://ecdc.docexploit.com/tenant")
+                + "/" + tenantKey;
+
+        String publicApiBaseUrl = tenantBaseUrl + "/api";
+        String managementApiBaseUrl = tenantBaseUrl + "/protocol";
+
+        String controlPlaneService = "edc-" + tenantKey + "-cp";
+        String dataPlaneService = "edc-" + tenantKey + "-dp";
+
+        Tenant tenant = Tenant.builder()
+                .code(generatedCode)
+                .tenantKey(tenantKey)
+                .name(request.getName())
+                .description(request.getDescription())
+                .participantDid(request.getParticipantDid())
+                .participantBpn(request.getParticipantBpn())
+                .contactName(request.getContactName())
+                .contactEmail(request.getContactEmail())
+                .contactPhone(request.getContactPhone())
+                .enabled(true)
+                .k8sNamespace(k8sNamespace)
+                .databaseName(databaseName)
+                .databaseSchema(null)
+                .databaseUsername(databaseUsername)
+                .managementApiBaseUrl(managementApiBaseUrl)
+                .publicApiBaseUrl(publicApiBaseUrl)
+                .controlPlaneService(controlPlaneService)
+                .dataPlaneService(dataPlaneService)
+                .lifecycleStatus(TenantLifecycleStatus.PROVISIONING)
+                .lastError(null)
+                .build();
+
         Tenant savedTenant = tenantRepository.save(tenant);
-        return getResponse(SAVED_MESSAGE, HttpStatus.CREATED, StatusCode.SUCCESS, savedTenant.toDto()).toResponseEntity();
+
+        // Non-blocking provisioning: trigger background worker and return immediately.
+        tenantProvisioningService.provisionAsync(savedTenant.getId());
+
+        return getResponse(
+                "Provisioning started",
+                HttpStatus.ACCEPTED,
+                StatusCode.SUCCESS,
+                savedTenant.toDto()
+        ).toResponseEntity();
     }
 
     @Override
@@ -45,9 +102,29 @@ public class TenantServiceImpl implements TenantService {
         Tenant existingTenant = tenantRepository.findById(id).orElse(null);
 
         if (isNotNullOrEmpty(existingTenant)) {
-            validateUniqueTenantFields(tenantDto, id);
-            Tenant updatedEntity = tenantDto.toEntity(existingTenant);
-            Tenant updatedTenant = tenantRepository.save(updatedEntity);
+            // Only update client-editable fields to avoid wiping deployer-generated runtime config
+            if (isNotNullOrEmpty(tenantDto.getName())) {
+                existingTenant.setName(tenantDto.getName());
+            }
+            existingTenant.setDescription(tenantDto.getDescription());
+            if (isNotNullOrEmpty(tenantDto.getContactName())) {
+                existingTenant.setContactName(tenantDto.getContactName());
+            }
+            if (isNotNullOrEmpty(tenantDto.getContactEmail())) {
+                existingTenant.setContactEmail(tenantDto.getContactEmail());
+            }
+            existingTenant.setContactPhone(tenantDto.getContactPhone());
+            existingTenant.setEnabled(tenantDto.getEnabled() == null || tenantDto.getEnabled());
+
+            // If participant identity fields are being changed, validate uniqueness.
+            if (tenantDto.getParticipantDid() != null && !tenantDto.getParticipantDid().equals(existingTenant.getParticipantDid())) {
+                validateUniqueForCreate(requestFromExisting(tenantDto, existingTenant), id);
+            }
+            if (tenantDto.getParticipantBpn() != null && !tenantDto.getParticipantBpn().equals(existingTenant.getParticipantBpn())) {
+                validateUniqueForCreate(requestFromExisting(tenantDto, existingTenant), id);
+            }
+
+            Tenant updatedTenant = tenantRepository.save(existingTenant);
             return getResponse(UPDATED_MESSAGE, HttpStatus.ACCEPTED, StatusCode.SUCCESS, updatedTenant.toDto()).toResponseEntity();
         }
         throw new ResponseStatusException(HttpStatus.NOT_FOUND, NO_RECORD_FOUND);
@@ -100,17 +177,7 @@ public class TenantServiceImpl implements TenantService {
         return getResponse(NO_RECORD_FOUND, HttpStatus.NOT_FOUND, StatusCode.CLIENT_ERROR).toResponseEntity();
     }
 
-    private void validateUniqueTenantFields(TenantDto dto, UUID currentTenantId) {
-        assertUnique(
-                tenantRepository.findByCode(dto.getCode()),
-                currentTenantId,
-                "Tenant code already exists"
-        );
-        assertUnique(
-                tenantRepository.findByTenantKey(dto.getTenantKey()),
-                currentTenantId,
-                "Tenant key already exists"
-        );
+    private void validateUniqueForCreate(CreateTenantRequest dto, UUID currentTenantId) {
         assertUnique(
                 tenantRepository.findByParticipantDid(dto.getParticipantDid()),
                 currentTenantId,
@@ -127,5 +194,41 @@ public class TenantServiceImpl implements TenantService {
         if (existing.isPresent() && (currentTenantId == null || !existing.get().getId().equals(currentTenantId))) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, errorMessage);
         }
+    }
+
+    private String generateTenantCode() {
+        // Keep within Tenant.code max length (64)
+        return "TNT-" + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    private String toTenantKey(String code) {
+        return code.toLowerCase().replaceAll("[^a-z0-9\\-]", "-");
+    }
+
+    private String truncate(String value, int maxLen) {
+        if (value == null) {
+            return null;
+        }
+        return value.length() <= maxLen ? value : value.substring(0, maxLen);
+    }
+
+    private String defaultIfBlank(String value, String defaultValue) {
+        if (value == null) {
+            return defaultValue;
+        }
+        return value.trim().isEmpty() ? defaultValue : value;
+    }
+
+    private CreateTenantRequest requestFromExisting(TenantDto dto, Tenant existing) {
+        // Build a minimal CreateTenantRequest from update payload + existing values
+        CreateTenantRequest r = new CreateTenantRequest();
+        r.setParticipantDid(dto.getParticipantDid() != null ? dto.getParticipantDid() : existing.getParticipantDid());
+        r.setParticipantBpn(dto.getParticipantBpn() != null ? dto.getParticipantBpn() : existing.getParticipantBpn());
+        r.setName(existing.getName());
+        r.setDescription(existing.getDescription());
+        r.setContactName(dto.getContactName() != null ? dto.getContactName() : existing.getContactName());
+        r.setContactEmail(dto.getContactEmail() != null ? dto.getContactEmail() : existing.getContactEmail());
+        r.setContactPhone(dto.getContactPhone() != null ? dto.getContactPhone() : existing.getContactPhone());
+        return r;
     }
 }

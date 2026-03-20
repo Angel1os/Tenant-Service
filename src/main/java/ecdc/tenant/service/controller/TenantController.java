@@ -1,6 +1,7 @@
 package ecdc.tenant.service.controller;
 
 import ecdc.tenant.service.domain.dto.TenantDto;
+import ecdc.tenant.service.domain.request.CreateTenantRequest;
 import ecdc.tenant.service.record.Response;
 import ecdc.tenant.service.service.TenantService;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -8,6 +9,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
 
 import java.util.Map;
 import java.util.UUID;
@@ -48,12 +50,12 @@ public class TenantController {
     /**
      * Handles a POST request to create a new tenant.
      *
-     * @param dto The TenantDto containing information of the new tenant.
+     * @param request The CreateTenantRequest containing information provided by the UI/client.
      * @return ResponseEntity containing the Response with the created tenant.
      */
     @PostMapping
-    public Response createTenant(@Valid @RequestBody TenantDto dto){
-        return tenantService.create(dto).getBody();
+    public ResponseEntity<Response> createTenant(@Valid @RequestBody CreateTenantRequest request){
+        return tenantService.create(request);
     }
 
     /**
