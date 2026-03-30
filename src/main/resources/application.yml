@@ -102,3 +102,26 @@ springdoc:
       additional-query-string-params:
         grant_type: password
       scopes: openid,profile,email
+
+# Tenant provisioning (local/dev: docker compose)
+tenant:
+  provisioning:
+    enabled: true
+    mode: docker-compose # docker-compose | helm
+    root-dir: ./tenant-runtimes
+    base-config-template: classpath:provisioning/base-config.docker.properties
+    compose:
+      controlplane:
+        image: edc-runtime-memory:latest
+      dataplane:
+        image: edc-dataplane-hashicorp-vault:latest
+      # If your shared infra (postgres/redis/etc) runs in another compose project,
+      # set this to that project's network, e.g. docker-services_default
+      external-network: ""
+    helm:
+      chart: ""
+      base-values: ""
+  platform:
+    postgres:
+      host: localhost
+      port: 5432

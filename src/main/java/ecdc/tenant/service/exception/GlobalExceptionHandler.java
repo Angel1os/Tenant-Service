@@ -7,6 +7,7 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.authorization.AuthorizationDeniedException;
+import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -20,6 +21,12 @@ import static ecdc.tenant.service.utility.AppUtils.extractViolationMessage;
 @RestControllerAdvice
 @Slf4j
 public class GlobalExceptionHandler {
+    @ExceptionHandler(AsyncRequestNotUsableException.class)
+    public void handleAsyncRequestNotUsable(AsyncRequestNotUsableException ex) {
+        // Client disconnected / aborted the HTTP connection; nothing to return.
+        log.debug("Client aborted connection: {}", ex.getMessage());
+    }
+
     @ExceptionHandler(MethodArgumentNotValidException.class)
     ResponseEntity<Response> handleMethodArgumentNotValidExceptions(MethodArgumentNotValidException ex) {
         Map<String, String> errors = new HashMap<>();

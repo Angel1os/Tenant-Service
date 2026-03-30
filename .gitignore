@@ -31,3 +31,6 @@ build/
 
 ### VS Code ###
 .vscode/
+
+# Generated local runtime artifacts (per-tenant compose/config output)
+tenant-runtimes/
